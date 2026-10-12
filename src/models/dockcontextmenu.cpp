@@ -123,13 +123,29 @@ void DockContextMenu::showForTask(int index)
     });
     menu->addAction(QIcon::fromTheme(QStringLiteral("application-exit")), i18nc("@action:inmenu", "Quit"), qApp, &QApplication::quit);
 
-    // Track menu visibility for interaction lock (dock stays visible while menu is open)
-    Q_EMIT visibleChanged(true);
+    // Open before popup(): the popup grab makes QtWayland send the dock a
+    // synthetic leave, which QML must already see as part of the menu hold.
+    // Also drives the interaction lock (dock stays visible while menu is open).
+    setOpen(true);
     connect(menu, &QMenu::aboutToHide, this, [this]() {
-        Q_EMIT visibleChanged(false);
+        setOpen(false);
     });
 
     menu->popup(QCursor::pos());
+}
+
+bool DockContextMenu::isOpen() const
+{
+    return m_open;
+}
+
+void DockContextMenu::setOpen(bool open)
+{
+    if (m_open == open) {
+        return;
+    }
+    m_open = open;
+    Q_EMIT openChanged();
 }
 
 } // namespace krema

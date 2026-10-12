@@ -9,6 +9,7 @@
 - ctx-app-name: App name shown as header in menu
 - ctx-task-zones: Pin and unpin live tasks between zones without duplicate dock items
 - ctx-desktop-actions: The app's .desktop file actions (e.g. "New Private Window") launch from the menu
+- ctx-hover-hold: Hovered item keeps its zoom and its window preview stays closed while the menu is open
 
 ## Affected Files
 - src/models/dockcontextmenu.h
@@ -24,6 +25,10 @@
 - src/config/krema.kcfg
 - src/models/dockmodel.h
 - src/models/dockmodel.cpp
+- src/shell/previewcontroller.h
+- src/shell/previewcontroller.cpp
+- src/platform/pointerfocustracker.h
+- src/platform/pointerfocustracker.cpp
 
 **Tier:** Tier 2 (Appium/KWin). The left-click policy settings do not change
 right-click menu contents, entry ordering, Pin/Unpin, New Instance, Close,
@@ -221,3 +226,31 @@ app with a distinct window title.
 **Verification:** window list (new window's app id and title), kremarc
 (pinned membership), AT-SPI (item name and window count), screenshot (labels and icons)
 **Automated:** tests/appium/test_04_context_menu.py::test_ctx008_pinned_launcher_launches_the_chosen_desktop_action, tests/appium/test_04_context_menu.py::test_ctx008_grouped_windows_launch_the_chosen_desktop_action (order and NoDisplay are verified by effect: a wrong position launches a window with another title; labels, icons and the launch-error notification are screenshot/manual only). Resolution (Actions= order, NoDisplay, separators, localized names, applications:/local/absolute-path desktop files) is unit-tested in tests/unit/test_desktop_actions.cpp.
+
+## TC CTX-009: Menu Holds the Hovered Item's Zoom and Preview
+
+**Precondition:** `MaxZoomFactor=1.6`, window preview enabled with
+`PreviewHoverDelay=300`, seven pinned launchers; the middle one has an open
+window, so it is a task with a window preview.
+**Steps:**
+1. Hover the middle item and wait until its window preview is open; measure
+   the item's magnified width.
+2. Right-click without moving the pointer and wait for the menu.
+3. Watch the item and the preview for about 1.5 s while the menu is open.
+4. Press Escape without moving the pointer.
+5. Repeat steps 1-2, then click "Settings..." in the menu with the pointer, so
+   the menu closes with the pointer off the dock.
+
+**Expected:**
+- The preview closes within about 1 s of the menu opening and does not come
+  back, and no tooltip appears, while the menu is open.
+- The hovered item stays magnified (within 2 px of its hover width) for as long
+  as the menu is open.
+- After Escape with the pointer still on the item, the item stays magnified and
+  its preview reopens after the normal hover delay.
+- After the menu closes with the pointer off the dock, every item returns to
+  its rest size and the preview stays closed, like a normal pointer exit.
+
+**Verification:** KWin (menu window), AT-SPI (preview `showing`, painted item
+widths through `painted_rect`), screenshot (menu entry highlight)
+**Automated:** tests/appium/test_04_context_menu.py::test_ctx009_zoom_and_hover_hold_while_menu_is_open, tests/appium/test_04_context_menu.py::test_ctx009_zoom_releases_when_menu_closes_away_from_the_dock (skip without ScreenShot2 capture; the tooltip is not asserted)

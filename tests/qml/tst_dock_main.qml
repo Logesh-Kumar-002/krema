@@ -710,6 +710,319 @@ Item {
             tryCompare(tooltip, "visible", true, 2000)
         }
 
+        // --- Context menu hover hold ---
+
+        // Opens the mock menu the way production does: DockShell holds the
+        // preview hidden (PreviewController::setHeld) while it is open.
+        function openContextMenu() {
+            DockContextMenu.open = true
+            PreviewController.hidePreview()
+        }
+
+        // Hovers item 1 of three windows until its preview is shown, then
+        // opens the menu and delivers the pointer events QtWayland produces
+        // under the popup grab (a fake leave) plus motion over another icon.
+        function holdHoverUnderContextMenu() {
+            addTasks(["A", "B", "C"])
+            let dock = makeDock(3)
+            let its = items(dock)
+            let other = centerOf(its[0])
+            hoverItem(its[1])
+            tryCompare(its[1], "currentScale", DockSettings.maxZoomFactor)
+            tryCompare(PreviewController, "visible", true)
+            let panel = its[1].parent.parent
+            let anchor = Qt.point(panel.mouseX, panel.mouseY)
+
+            openContextMenu()
+            mouseMove(stage, -1, -1)
+            mouseMove(stage, other.x, other.y)
+            return { dock: dock, its: its, panel: panel, anchor: anchor }
+        }
+
+        function test_contextMenuHoldsHoverAndZoom() {
+            let s = holdHoverUnderContextMenu()
+            let shows = PreviewController.callsTo("showPreview").length
+            let deadline = Date.now() + DockSettings.previewHoverDelay + 200
+            tryVerify(() => PreviewController.callsTo("showPreview").length > shows
+                      || Date.now() >= deadline, 2000)
+
+            compare(s.dock.hoveredIndex, 1)
+            verify(s.dock._zoomActive)
+            compare(s.panel.mouseX, s.anchor.x)
+            compare(s.panel.mouseY, s.anchor.y)
+            compare(s.its[1].currentScale, DockSettings.maxZoomFactor)
+            compare(PreviewController.callsTo("showPreview").length, shows,
+                    "a preview was requested while the context menu was open")
+            verify(!PreviewController.visible)
+            verify(!dockTooltip(s.dock).visible)
+            compare(DockVisibility.hovered, true)
+        }
+
+        function test_contextMenuCloseWithPointerInsideResumesHover() {
+            let s = holdHoverUnderContextMenu()
+            let shows = PreviewController.callsTo("showPreview").length
+
+            DockView.pointerInside = true
+            DockContextMenu.open = false
+            tryVerify(() => PreviewController.callsTo("showPreview").length > shows, 2000,
+                      "the held item's preview did not return after the menu closed")
+            let calls = PreviewController.callsTo("showPreview")
+            compare(calls[calls.length - 1].args[0], 1)
+            compare(s.dock.hoveredIndex, 1)
+            verify(s.dock._zoomActive)
+            compare(s.panel.mouseX, s.anchor.x)
+            compare(s.its[1].currentScale, DockSettings.maxZoomFactor)
+            compare(DockVisibility.hovered, true)
+        }
+
+        function test_contextMenuCloseWithPointerOutsideReleasesHover() {
+            let s = holdHoverUnderContextMenu()
+
+            DockView.pointerInside = false
+            DockContextMenu.open = false
+            tryCompare(s.dock, "hoveredIndex", -1)
+            verify(!s.dock._zoomActive)
+            compare(s.panel.mouseX, -1)
+            for (let it of s.its) tryCompare(it, "currentScale", 1.0)
+            compare(DockVisibility.hovered, false)
+        }
+
+        // QtWayland sends no enter when the popup closes, so after a resume
+        // Qt still thinks the pointer is outside the dock. A real compositor
+        // leave then reaches no onExited and must end hover via pointerInside.
+        function test_compositorLeaveAfterResumeReleasesStaleHover() {
+            let s = holdHoverUnderContextMenu()
+            // Last Qt event leaves the dock: the stale state after the grab.
+            mouseMove(stage, -1, -1)
+            DockView.pointerInside = true
+            let shows = PreviewController.callsTo("showPreview").length
+            DockContextMenu.open = false
+            tryVerify(() => PreviewController.callsTo("showPreview").length > shows, 2000)
+            compare(s.dock.hoveredIndex, 1)
+
+            // Pointer jumps to another surface without moving over the dock.
+            let hides = PreviewController.callsTo("hidePreviewDelayed").length
+            DockView.pointerInside = false
+            tryCompare(s.dock, "hoveredIndex", -1)
+            verify(PreviewController.callsTo("hidePreviewDelayed").length > hides)
+            // Production's delayed hide fires; the preview must stay closed.
+            PreviewController.hidePreview()
+            shows = PreviewController.callsTo("showPreview").length
+            verify(!s.dock._zoomActive)
+            compare(DockVisibility.hovered, false)
+            wait(DockSettings.previewHoverDelay + 200)
+            compare(PreviewController.callsTo("showPreview").length, shows,
+                    "the preview reopened after the pointer left the dock")
+            verify(!PreviewController.visible)
+        }
+
+        // Rows shifting under the held anchor re-run the hit test through
+        // scale/geometry callbacks; none of them may move the held hover.
+        function test_contextMenuHoldIgnoresGeometryHitTests() {
+            let s = holdHoverUnderContextMenu()
+            DockModel.tasksModel.removeTask(0)
+            tryVerify(() => items(s.dock).length === 2, 2000)
+            settleDeferredCallbacks()
+            wait(100)  // delegateGeometryRefreshTimer and scale callbacks
+            s.dock.updateHoveredItem()
+            s.dock.trackPointer(-1, -1)
+
+            compare(s.dock.hoveredIndex, 1)
+            compare(s.dock.hoveredName, "B")
+            verify(s.dock._zoomActive)
+            compare(s.panel.mouseX, s.anchor.x)
+            compare(s.panel.mouseY, s.anchor.y)
+        }
+
+        // "Close" on the last task from the menu: the window goes away after
+        // the menu resumed hover with the pointer resting on the dock.
+        function test_heldItemRemovedAfterResumeRehitsHover() {
+            addTasks(["A", "B", "C"])
+            let dock = makeDock(3)
+            let its = items(dock)
+            hoverItem(its[2])
+            tryCompare(its[2], "currentScale", DockSettings.maxZoomFactor)
+            tryCompare(PreviewController, "visible", true)
+            openContextMenu()
+            mouseMove(stage, -1, -1)
+
+            DockView.pointerInside = true
+            DockContextMenu.open = false
+            compare(dock.hoveredIndex, 2)
+            // The resume reconciles, then restarts the held item's preview.
+            let resumed = PreviewController.callsTo("showPreview").length
+            tryVerify(() => PreviewController.callsTo("showPreview").length > resumed, 2000,
+                      "the held item's preview did not return after the menu closed")
+            let shows = PreviewController.callsTo("showPreview").length
+            DockModel.tasksModel.removeTask(2)
+            tryVerify(() => items(dock).length === 2, 2000)
+
+            tryVerify(() => dock.hoveredIndex < 2, 2000,
+                      "hover still points at the removed row")
+            verify(dock.hoveredName !== "C")
+            wait(DockSettings.previewHoverDelay + 200)
+            verify(dock.hoveredIndex < 2)
+            let tooltip = dockTooltip(dock)
+            verify(!(tooltip.visible && dock.hoveredName === "C"),
+                   "the removed task's tooltip was shown")
+            let removed = PreviewController.callsTo("showPreview").slice(shows)
+                .filter(c => c.args[0] >= 2)
+            compare(removed.length, 0, "a preview was requested for the removed row")
+        }
+
+        // Rest-centre hit on the primary axis: the item whose slot now holds
+        // a stage-space point the pointer never left.
+        function itemUnderPoint(dock, panel, point) {
+            let local = panel.mapFromItem(stage, point.x, point.y)
+            let primary = DockView.isVertical ? local.y : local.x
+            let best = -1
+            let bestDist = Infinity
+            for (let it of items(dock)) {
+                let dist = Math.abs(primary - it.itemCenterX)
+                if (dist < bestDist) { best = it.index; bestDist = dist }
+            }
+            return best
+        }
+
+        // Hovers `hover`, holds it under the context menu, removes `rows` (in
+        // order) while held so the dock re-centres, then closes the menu with
+        // the pointer still resting where it was.
+        function resumeAfterHeldRemoval(names, hover, rows) {
+            addTasks(names)
+            let dock = makeDock(names.length)
+            let its = items(dock)
+            let panel = its[hover].parent.parent
+            let pointer = hoverItem(its[hover])
+            tryCompare(its[hover], "currentScale", DockSettings.maxZoomFactor)
+            tryCompare(PreviewController, "visible", true)
+            openContextMenu()
+            mouseMove(stage, -1, -1)
+
+            for (let row of rows)
+                DockModel.tasksModel.removeTask(row)
+            tryVerify(() => items(dock).length === names.length - rows.length, 2000)
+            settleDeferredCallbacks()
+            wait(100)  // delegateGeometryRefreshTimer settles while held
+            compare(dock.hoveredIndex, hover, "the hold moved the hover")
+
+            let shows = PreviewController.callsTo("showPreview").length
+            DockView.pointerInside = true
+            DockContextMenu.open = false
+            return { dock: dock, panel: panel, pointer: pointer, shows: shows }
+        }
+
+        // Hover B, remove C and D under the menu: the re-centred dock puts A
+        // under the resting pointer, which the panel-local anchor misses.
+        function test_resumeAfterHeldRecentreHitsItemUnderPointer() {
+            let s = resumeAfterHeldRemoval(["A", "B", "C", "D"], 1, [3, 2])
+            let expected = () => itemUnderPoint(s.dock, s.panel, s.pointer)
+            tryVerify(() => expected() >= 0 && s.dock.hoveredIndex === expected(), 2000,
+                      "hover did not follow the item under the resting pointer")
+            let target = expected()
+            verify(target !== 1, "fixture: re-centring must move another item under the pointer")
+            compare(s.dock.hoveredName, items(s.dock)[target].displayName)
+
+            tryVerify(() => PreviewController.callsTo("showPreview").slice(s.shows)
+                      .some(c => c.args[0] === target), 2000,
+                      "no preview for the item under the pointer")
+            wait(DockSettings.previewHoverDelay + 200)
+            compare(s.dock.hoveredIndex, target)
+            let stray = PreviewController.callsTo("showPreview").slice(s.shows)
+                .filter(c => c.args[0] !== target)
+            compare(stray.length, 0, "a preview was requested for an item not under the pointer")
+        }
+
+        // Zero hover delay: the resume must not restart the preview for the
+        // held index (now a shifted row) before reconciliation re-hits it.
+        function test_resumeAtZeroDelayWaitsForReconcile() {
+            DockSettings.previewHoverDelay = 0
+            let s = resumeAfterHeldRemoval(["A", "B", "C", "D", "E"], 2, [1, 0])
+            // Row 2 still exists (E) but is no longer under the pointer.
+            compare(items(s.dock).length, 3)
+            let expected = () => itemUnderPoint(s.dock, s.panel, s.pointer)
+            tryVerify(() => expected() >= 0 && s.dock.hoveredIndex === expected(), 2000,
+                      "hover did not follow the item under the resting pointer")
+            let target = expected()
+            verify(target !== 2, "fixture: the held index must now be a shifted row")
+
+            tryVerify(() => PreviewController.callsTo("showPreview").slice(s.shows)
+                      .some(c => c.args[0] === target), 2000,
+                      "no preview for the item under the pointer")
+            wait(200)
+            let stray = PreviewController.callsTo("showPreview").slice(s.shows)
+                .filter(c => c.args[0] !== target)
+            compare(stray.length, 0, "a preview was requested for the stale row before reconciliation")
+        }
+
+        // The menu closes before the layout settles, then a row is inserted
+        // and a geometry hit test runs while reconciliation is pending: hover
+        // stays held until the reconcile, so neither the row insert's auto
+        // preview nor the hit test acts on the held index, which the insert
+        // turns into a valid but unrelated row (H).
+        function test_reconcileWindowHoldsHoverThroughInsertAndHitTest() {
+            DockSettings.previewHoverDelay = 0
+            addTasks(["A", "B", "C", "D", "E", "F", "G"])
+            let dock = makeDock(7)
+            let its = items(dock)
+            let panel = its[4].parent.parent
+            let pointer = hoverItem(its[4])
+            tryCompare(its[4], "currentScale", DockSettings.maxZoomFactor)
+            tryCompare(PreviewController, "visible", true)
+            openContextMenu()
+            mouseMove(stage, -1, -1)
+
+            for (let row of [2, 1, 0])
+                DockModel.tasksModel.removeTask(row)
+            let shows = PreviewController.callsTo("showPreview").length
+            DockView.pointerInside = true
+            DockContextMenu.open = false
+            verify(dock._hoverHeld, "hover released before the post-menu reconcile")
+            addTasks(["H"])
+            dock.updateHoveredItem()
+            compare(dock.hoveredIndex, 4, "the reconcile window moved the held hover")
+            compare(PreviewController.callsTo("showPreview").length, shows,
+                    "a preview was requested during the reconcile window")
+
+            tryVerify(() => !dock._hoverHeld, 2000, "reconciliation never ran")
+            tryCompare(dock, "hoveredIndex", 3, 2000)
+            let target = itemUnderPoint(dock, panel, pointer)
+            compare(target, 3, "fixture: G must sit under the resting pointer")
+            compare(dock.hoveredName, "G")
+            tryVerify(() => PreviewController.callsTo("showPreview").slice(shows)
+                      .some(c => c.args[0] === target), 2000,
+                      "no preview for the item under the pointer")
+            wait(200)
+            let stray = PreviewController.callsTo("showPreview").slice(shows)
+                .filter(c => c.args[0] !== target)
+            compare(stray.length, 0, "a preview was requested for a row not under the pointer")
+        }
+
+        // Real motion over the dock while the reconcile is pending ends it and
+        // is tracked normally.
+        function test_motionDuringReconcileWindowTracksPointer() {
+            let s = holdHoverUnderContextMenu()
+            // The held move already reached its[0]; Qt drops a move to the same spot.
+            let other = centerOf(s.its[0])
+            other.x += 1
+            // Keep the layout refresh pending so the reconcile cannot run first.
+            s.dock.scheduleDelegateGeometryRefresh()
+            DockView.pointerInside = true
+            DockContextMenu.open = false
+            verify(s.dock._hoverReconciling)
+            let shows = PreviewController.callsTo("showPreview").length
+
+            mouseMove(stage, other.x, other.y)
+            verify(!s.dock._hoverReconciling, "real motion did not end the reconcile window")
+            verify(!s.dock._hoverHeld)
+            tryCompare(s.dock, "hoveredIndex", 0, 2000)
+            tryVerify(() => PreviewController.callsTo("showPreview").slice(shows)
+                      .some(c => c.args[0] === 0), 2000,
+                      "the tracked item's preview did not open")
+            let stale = PreviewController.callsTo("showPreview").slice(shows)
+                .filter(c => c.args[0] !== 0)
+            compare(stale.length, 0, "a preview was requested for the held item after motion")
+        }
+
         function test_fastLauncherTooltipAtZeroDelay() {
             DockSettings.previewHoverDelay = 0
             DockModel.tasksModel.addTask({

@@ -92,6 +92,11 @@ public:
     /// Update whether the mouse is hovering the preview surface.
     Q_INVOKABLE void setPreviewHovered(bool hovered);
 
+    /// Hold the preview hidden while the dock context menu is open: hides it
+    /// now and ignores showPreview() until released. Releasing only clears
+    /// the hold; QML re-shows the preview through its normal hover pipeline.
+    void setHeld(bool held);
+
     /// Update the content size from QML (after layout).
     Q_INVOKABLE void setContentSize(qreal width, qreal height);
 
@@ -153,6 +158,7 @@ private:
 
     bool m_visible = false;
     bool m_previewHovered = false;
+    bool m_held = false;
     int m_parentIndex = -1;
 
     qreal m_contentX = 0;

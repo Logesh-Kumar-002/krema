@@ -197,8 +197,13 @@ void DockShell::connectSettingsSignals()
 
 void DockShell::connectMenuSignals()
 {
-    // Context menu interaction lock: dock stays visible while menu is open
-    connect(m_contextMenu.get(), &DockContextMenu::visibleChanged, m_view->visibilityController(), &DockVisibilityController::setInteracting);
+    // Context menu interaction lock: dock stays visible while menu is open,
+    // and the preview (an Overlay surface above popups) stays hidden.
+    connect(m_contextMenu.get(), &DockContextMenu::openChanged, this, [this]() {
+        const bool open = m_contextMenu->isOpen();
+        m_view->visibilityController()->setInteracting(open);
+        m_previewController->setHeld(open);
+    });
 
     connect(m_contextMenu.get(), &DockContextMenu::settingsRequested, this, [this]() {
         m_settingsWindow->show();

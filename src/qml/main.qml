@@ -50,6 +50,59 @@ Item {
             delegateGeometryRefreshTimer.restart()
     }
 
+    // Rows removed/moved/reset under a resting pointer leave hoveredIndex on
+    // a shifted or missing row with no motion to re-hit-test it. Once the
+    // layout has settled (delegateGeometryRefreshTimer), re-run the hit test
+    // from the last real pointer sample in root coordinates: the dock
+    // re-centres, so the panel-local zoom anchor no longer marks the spot
+    // under the pointer. A pending request survives the context menu hold and
+    // runs after the menu closes.
+    property bool _hoverRehitPending: false
+    // Menu closed with the pointer on the dock, reconciliation not yet run:
+    // hover stays held (see _hoverHeld) so geometry callbacks, row inserts
+    // and timers cannot act on a row that shifted under the pointer.
+    property bool _hoverReconciling: false
+    // Last real pointer position in root (dock window) coordinates, the
+    // space trackPointer() takes. Not updated while hover is held.
+    property real _pointerRootX: -1
+    property real _pointerRootY: -1
+    function scheduleHoverRehit() {
+        if (hoveredIndex < 0) return
+        _hoverRehitPending = true
+        scheduleDelegateGeometryRefresh()
+    }
+    function _runHoverRehit() {
+        if (!_hoverRehitPending || _menuHeld) return
+        let resuming = _hoverReconciling
+        _hoverRehitPending = false
+        // Release the hold in the same block as the hit test it lets run.
+        _hoverReconciling = false
+        if (!_pointerOnDock || keyboardNavigating || (hoveredIndex < 0 && !resuming))
+            return
+        let before = hoveredIndex
+        trackPointer(_pointerRootX, _pointerRootY)
+        if (hoveredIndex < 0 || hoveredIndex !== before) return
+        // Same index, different row: the hit test only renames on a change.
+        hoveredName = dockRepeater.itemAt(hoveredIndex)?.displayName ?? ""
+        // A changed index restarted the pipeline in onHoveredIndexChanged;
+        // an unchanged one resumes it here, once.
+        if (resuming && hoveredIndex < dockRepeater.count)
+            tooltipTimer.restart()
+    }
+    // Deferred from the menu close; waits for a pending layout refresh,
+    // which runs the reconcile itself.
+    function _reconcileAfterHold() {
+        if (!_hoverReconciling || _menuHeld || delegateGeometryRefreshTimer.running) return
+        _runHoverRehit()
+    }
+    // Real pointer input during the reconcile window: reconcile at it now.
+    function _reconcileAt(x, y) {
+        _pointerRootX = x
+        _pointerRootY = y
+        _hoverRehitPending = true
+        _runHoverRehit()
+    }
+
     Timer {
         id: delegateGeometryRefreshTimer
         interval: 50
@@ -59,6 +112,7 @@ Item {
                 if (item)
                     item.publishDelegateGeometry()
             }
+            root._runHoverRehit()
         }
     }
 
@@ -81,6 +135,7 @@ Item {
 
     function startKeyboardNavigation() {
         keyboardNavigating = true
+        _hoverReconciling = false
         // Suppress tooltip and preview auto-triggers during keyboard nav
         tooltipTimer.stop()
         tooltipItem.show = false
@@ -144,6 +199,7 @@ Item {
 
     function navigateItem(delta) {
         keyboardNavigating = true
+        _hoverReconciling = false
         let count = dockRepeater.count
         if (count === 0) return
 
@@ -273,8 +329,9 @@ Item {
             event.accepted = true
             break
         case previewKey:
-            // Open preview for the focused item (if it has windows)
-            if (hoveredIndex >= 0) {
+            // Open preview for the focused item (if it has windows); not for
+            // a held hover that still awaits its post-menu reconcile.
+            if (hoveredIndex >= 0 && !_hoverHeld) {
                 let idx = DockModel.tasksModel.index(hoveredIndex, 0)
                 let isWindow = DockModel.tasksModel.data(
                     idx, TaskManager.AbstractTasksModel.IsWindow)
@@ -302,6 +359,18 @@ Item {
     // until the mouse leaves the panel zone entirely. This prevents rapid zoom
     // on/off flickering when moving between icons through tiny gaps.
     property bool _zoomActive: false
+
+    // Hover hold while the context menu is open. Its popup grab makes
+    // QtWayland send the dock a fake leave (the compositor keeps pointer
+    // focus) and no enter when it closes, so dock pointer events must not
+    // change hover/zoom until the menu closes and the real focus is checked.
+    // Null-safe: the context property goes away first when a dock shell is torn down.
+    readonly property bool _menuHeld: DockContextMenu?.open ?? false
+    // Also held until the post-menu reconciliation runs (_hoverReconciling).
+    readonly property bool _hoverHeld: _menuHeld || _hoverReconciling
+    // Pointer on the dock as the dock tracks it. Replaces
+    // dockMouseArea.containsMouse, which stays false after the fake leave.
+    property bool _pointerOnDock: false
 
     // --- Internal drag state ---
     property bool _dragActive: false
@@ -406,6 +475,7 @@ Item {
     }
 
     function _tryAutoPreview() {
+        if (_hoverHeld) return
         if (!DockSettings.previewEnabled) return
         if (hoveredIndex < 0 || PreviewController.visible) return
         let idx = DockModel.tasksModel.index(hoveredIndex, 0)
@@ -459,6 +529,8 @@ Item {
     // dockPanel.mouseY = secondary axis (depth), so all zoom/hover logic works
     // identically regardless of orientation; -1 = outside the dock zone.
     function trackPointer(x, y) {
+        // The context menu holds the zoom anchor (see _hoverHeld).
+        if (_hoverHeld) return
         let zoomExtension = DockSettings.iconSize * (DockSettings.maxZoomFactor - 1.0)
 
         if (DockView.isVertical) {
@@ -494,6 +566,8 @@ Item {
     }
 
     function updateHoveredItem() {
+        // Geometry/scale callbacks must not move the held hover.
+        if (_hoverHeld) return
         if (dockPanel.mouseX < 0) {
             hoveredIndex = -1
             hoveredName = ""
@@ -504,7 +578,7 @@ Item {
         // preview, onExited keeps mouseX/mouseY as the zoom anchor; icons that
         // move under that stale position (re-centring for a new task row) must
         // not re-hover an item, or its preview reopens with the pointer away.
-        if (!dockMouseArea.containsMouse)
+        if (!_pointerOnDock)
             return
 
         // Rough secondary-axis check: outside the dockRow + zoom extension on
@@ -621,6 +695,82 @@ Item {
         }
     }
 
+    // Pointer left the dock: release zoom and hover unless the preview keeps
+    // them (dock→preview transition), and end a drag as a drag-out.
+    function _pointerLeft() {
+        _pointerOnDock = false
+        _hoverReconciling = false
+        // Keep zoom state when preview is visible (dock→preview mouse transition)
+        if (!PreviewController.visible) {
+            dockPanel.mouseX = -1
+            dockPanel.mouseY = -1
+            _zoomActive = false
+        }
+        hoveredIndex = -1
+        hoveredName = ""
+        // Hide preview with delay (allows mouse to move to preview surface)
+        PreviewController.hidePreviewDelayed()
+        // Drag-out: if an active drag leaves the dock, unpin the launcher
+        if (_dragActive) {
+            if (DockModel.isPinned(_dragSourceIndex)) {
+                DockActions.removeLauncher(_dragSourceIndex)
+            }
+            _dragActive = false
+            _dragPending = false
+            _dragSourceIndex = -1
+            _dragTargetIndex = -1
+            DockVisibility.setDragActive(false)
+        } else if (_dragPending) {
+            _dragPending = false
+            _dragSourceIndex = -1
+            _dragTargetIndex = -1
+            dragHoldTimer.stop()
+        }
+        // preview visible이면 dock hover 상태 유지 (입력 영역 축소 방지)
+        if (!PreviewController.visible) {
+            DockVisibility.setHovered(false)
+        }
+    }
+
+    // Hold hover state while the context menu is open; on close, reconcile
+    // with the compositor's pointer focus since Qt's hover is stale.
+    Connections {
+        target: DockContextMenu
+        function onOpenChanged() {
+            if (DockContextMenu.open) {
+                root._hoverReconciling = false
+                tooltipTimer.stop()
+                tooltipItem.show = false
+                return
+            }
+            if (root.keyboardNavigating)
+                return
+            if (DockView.pointerInside) {
+                // Next real motion arrives as enter + move and resumes tracking.
+                // Until then, keep hover held and re-hit-test the last real
+                // pointer sample (rows may have shifted under it while held)
+                // before restarting the hover pipeline.
+                root._pointerOnDock = true
+                root._hoverRehitPending = true
+                root._hoverReconciling = true
+                Qt.callLater(root._reconcileAfterHold)
+            } else {
+                root._pointerLeft()
+            }
+        }
+    }
+
+    // After a popup grab Qt's hover is stale (it thinks the pointer is
+    // outside), so a real compositor leave reaches no onExited; end hover here.
+    Connections {
+        target: DockView
+        function onPointerInsideChanged() {
+            if (!DockView.pointerInside && !root._menuHeld && root._pointerOnDock
+                    && !dockMouseArea.containsMouse)
+                root._pointerLeft()
+        }
+    }
+
     MouseArea {
         id: dockMouseArea
         Accessible.ignored: true
@@ -628,39 +778,18 @@ Item {
         hoverEnabled: true
         acceptedButtons: Qt.LeftButton | Qt.MiddleButton | Qt.RightButton
 
-        // Track hover state for visibility controller
-        onEntered: DockVisibility.setHovered(true)
+        // Track hover state for visibility controller. Ignored while the
+        // context menu holds hover; real input ends a pending reconcile.
+        onEntered: {
+            if (root._menuHeld) return
+            root._pointerOnDock = true
+            DockVisibility.setHovered(true)
+            if (root._hoverReconciling)
+                root._reconcileAt(mouseX, mouseY)
+        }
         onExited: {
-            // Keep zoom state when preview is visible (dock→preview mouse transition)
-            if (!PreviewController.visible) {
-                dockPanel.mouseX = -1
-                dockPanel.mouseY = -1
-                root._zoomActive = false
-            }
-            root.hoveredIndex = -1
-            root.hoveredName = ""
-            // Hide preview with delay (allows mouse to move to preview surface)
-            PreviewController.hidePreviewDelayed()
-            // Drag-out: if an active drag leaves the dock, unpin the launcher
-            if (root._dragActive) {
-                if (DockModel.isPinned(root._dragSourceIndex)) {
-                    DockActions.removeLauncher(root._dragSourceIndex)
-                }
-                root._dragActive = false
-                root._dragPending = false
-                root._dragSourceIndex = -1
-                root._dragTargetIndex = -1
-                DockVisibility.setDragActive(false)
-            } else if (root._dragPending) {
-                root._dragPending = false
-                root._dragSourceIndex = -1
-                root._dragTargetIndex = -1
-                dragHoldTimer.stop()
-            }
-            // preview visible이면 dock hover 상태 유지 (입력 영역 축소 방지)
-            if (!PreviewController.visible) {
-                DockVisibility.setHovered(false)
-            }
+            if (root._menuHeld) return
+            root._pointerLeft()
         }
 
         // Start drag hold timer on left-button press.
@@ -673,7 +802,14 @@ Item {
             // Preserve drag suppression while any other button remains held.
             if (mouse.buttons === mouse.button)
                 root._dragWasActive = false
-            if (!root.keyboardNavigating)
+            // MouseArea fills root: mouse.x/y are root coordinates.
+            if (!root._menuHeld) {
+                root._pointerRootX = mouse.x
+                root._pointerRootY = mouse.y
+            }
+            if (root._hoverReconciling && !root._menuHeld)
+                root._reconcileAt(mouse.x, mouse.y)
+            else if (!root.keyboardNavigating)
                 root.trackPointer(mouse.x, mouse.y)
             if (mouse.button === Qt.LeftButton && root.hoveredIndex >= 0) {
                 root._dragStartX = mouse.x
@@ -740,6 +876,7 @@ Item {
 
         // Mouse wheel: cycle through child windows of the hovered app
         onWheel: function(wheel) {
+            if (root._hoverHeld) return
             if (root.hoveredIndex < 0) return
             if (wheel.angleDelta.y > 0) {
                 DockActions.cycleWindows(root.hoveredIndex, false)
@@ -750,6 +887,11 @@ Item {
 
         // Track mouse position for parabolic zoom + drag handling
         onPositionChanged: function(mouse) {
+            if (root._menuHeld) return
+            root._pointerOnDock = true
+            root._pointerRootX = mouse.x
+            root._pointerRootY = mouse.y
+
             // Mouse movement cancels keyboard navigation mode
             if (root.keyboardNavigating) {
                 root.keyboardNavigating = false
@@ -776,7 +918,10 @@ Item {
                 return  // Skip normal zoom handling during drag
             }
 
-            root.trackPointer(mouse.x, mouse.y)
+            if (root._hoverReconciling)
+                root._reconcileAt(mouse.x, mouse.y)
+            else
+                root.trackPointer(mouse.x, mouse.y)
         }
     }
 
@@ -1400,7 +1545,7 @@ Item {
         id: autoPreviewTimer
         interval: 200
         repeat: true
-        running: tooltipItem.visible && !PreviewController.visible
+        running: tooltipItem.visible && !PreviewController.visible && !root._hoverHeld
         onTriggered: root._tryAutoPreview()
     }
 
@@ -1410,7 +1555,9 @@ Item {
     Connections {
         target: PreviewController
         function onVisibleChanged() {
-            if (!PreviewController.visible && !dockMouseArea.containsMouse) {
+            // The menu hold hides the preview; hover is reconciled on close.
+            if (root._hoverHeld) return
+            if (!PreviewController.visible && !root._pointerOnDock) {
                 // Preview closed and mouse not on dock → release zoom smoothly
                 dockPanel.mouseX = -1
                 dockPanel.mouseY = -1
@@ -1431,7 +1578,10 @@ Item {
         id: tooltipTimer
         interval: DockSettings.previewHoverDelay
         onTriggered: {
-            if (root.hoveredIndex < 0) return
+            if (root.hoveredIndex < 0 || root._hoverHeld) return
+            // Row removed under the hover before the re-hit-test ran.
+            if (root.hoveredIndex >= dockRepeater.count
+                    || !dockRepeater.itemAt(root.hoveredIndex)) return
             let idx = DockModel.tasksModel.index(root.hoveredIndex, 0)
             let isWindow = DockModel.tasksModel.data(
                 idx, TaskManager.AbstractTasksModel.IsWindow)
@@ -1517,6 +1667,7 @@ Item {
             function onHoveredIndexChanged() {
                 tooltipItem.show = false
                 tooltipTimer.stop()
+                if (root._hoverHeld) return
                 if (root.hoveredIndex < 0) {
                     // Mouse left dock: start delayed preview hide
                     PreviewController.hidePreviewDelayed()
@@ -1540,10 +1691,19 @@ Item {
             root._tryAutoPreview()
             root.scheduleDelegateGeometryRefresh()
         }
-        function onRowsRemoved() { root.scheduleDelegateGeometryRefresh() }
-        function onRowsMoved() { root.scheduleDelegateGeometryRefresh() }
+        function onRowsRemoved() {
+            root.scheduleDelegateGeometryRefresh()
+            root.scheduleHoverRehit()
+        }
+        function onRowsMoved() {
+            root.scheduleDelegateGeometryRefresh()
+            root.scheduleHoverRehit()
+        }
         function onLayoutChanged() { root.scheduleDelegateGeometryRefresh() }
-        function onModelReset() { root.scheduleDelegateGeometryRefresh() }
+        function onModelReset() {
+            root.scheduleDelegateGeometryRefresh()
+            root.scheduleHoverRehit()
+        }
     }
 
 }

@@ -24,6 +24,7 @@ namespace krema
 {
 
 class DockVisibilityController;
+class PointerFocusTracker;
 class ScreenSettings;
 class TaskIconProvider;
 
@@ -45,6 +46,10 @@ class DockView : public QQuickView
     Q_PROPERTY(int edge READ edge NOTIFY edgeChanged)
     Q_PROPERTY(bool isVertical READ isVertical NOTIFY edgeChanged)
     Q_PROPERTY(int sideTooltipReserve READ sideTooltipReserve WRITE setSideTooltipReserve NOTIFY sideTooltipReserveChanged)
+    /// Whether the compositor's pointer focus is on the dock surface. Unlike
+    /// Qt's hover state this ignores the leave QtWayland fakes for a popup
+    /// grab (see PointerFocusTracker). False without a Wayland pointer.
+    Q_PROPERTY(bool pointerInside READ isPointerInside NOTIFY pointerInsideChanged)
 
 public:
     explicit DockView(std::unique_ptr<DockPlatform> platform, KremaSettings *settings, QWindow *parent = nullptr);
@@ -113,6 +118,9 @@ public:
                                        qreal minEdge,
                                        qreal maxEdge) const;
 
+    /// See the pointerInside property.
+    [[nodiscard]] bool isPointerInside() const;
+
 public Q_SLOTS:
     void applyBackgroundStyle();
     void bumpIconCacheVersion();
@@ -124,6 +132,7 @@ Q_SIGNALS:
     void iconCacheVersionChanged();
     void edgeChanged();
     void sideTooltipReserveChanged();
+    void pointerInsideChanged();
 
 private:
     /// Extra height above the panel needed for zoomed icons.
@@ -140,6 +149,7 @@ private:
     KremaSettings *m_settings = nullptr;
     ScreenSettings *m_screenSettings = nullptr;
     DockVisibilityController *m_visibilityController = nullptr;
+    std::unique_ptr<PointerFocusTracker> m_pointerFocusTracker;
     TaskIconProvider *m_iconProvider = nullptr;
     int m_iconCacheVersion = 0;
     int m_sideTooltipReserve = 0;

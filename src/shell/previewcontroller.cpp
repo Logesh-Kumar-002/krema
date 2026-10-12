@@ -190,6 +190,12 @@ qreal PreviewController::contentHeight() const
 
 void PreviewController::showPreview(int index, qreal itemGlobalPos, qreal itemExtent)
 {
+    if (m_held) {
+        // The preview is an Overlay surface and would cover the context menu.
+        qCDebug(lcPreview) << "showPreview ignored: held by context menu";
+        return;
+    }
+
     m_hideTimer.stop();
 
     const bool indexChanged = (m_parentIndex != index);
@@ -221,7 +227,7 @@ void PreviewController::hidePreview()
 
 void PreviewController::hidePreviewDelayed()
 {
-    if (!m_visible) {
+    if (!m_visible || m_held) {
         return;
     }
     qCDebug(lcPreview) << "hidePreviewDelayed: starting" << m_hideTimer.interval() << "ms timer";
@@ -240,9 +246,21 @@ void PreviewController::setPreviewHovered(bool hovered)
     if (hovered) {
         m_hideTimer.stop();
     } else {
-        if (m_visible) {
+        if (m_visible && !m_held) {
             m_hideTimer.start();
         }
+    }
+}
+
+void PreviewController::setHeld(bool held)
+{
+    if (m_held == held) {
+        return;
+    }
+    m_held = held;
+    qCDebug(lcPreview) << "setHeld:" << held;
+    if (held) {
+        hidePreview();
     }
 }
 

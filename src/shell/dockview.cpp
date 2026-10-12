@@ -7,6 +7,7 @@
 #include "dockvisibilitycontroller.h"
 #include "krema.h"
 #include "models/taskiconprovider.h"
+#include "platform/pointerfocustracker.h"
 #include "utils/surfacegeometry.h"
 #include "utils/zoomlayoutvariant.h"
 
@@ -65,6 +66,11 @@ void DockView::initialize(TaskManager::TasksModel *tasksModel,
     // Create visibility controller (manages show/hide logic for all modes)
     m_visibilityController = new DockVisibilityController(m_platform.get(), tasksModel, virtualDesktopInfo, activityInfo, this, this);
     m_visibilityController->setMode(visibilityMode);
+
+    // Created once, before show(), so it already holds the compositor's
+    // focus when a context menu's popup grab fakes a leave.
+    m_pointerFocusTracker = std::make_unique<PointerFocusTracker>(this);
+    connect(m_pointerFocusTracker.get(), &PointerFocusTracker::pointerInsideChanged, this, &DockView::pointerInsideChanged);
 
     // Register the icon image provider for QML
     m_iconProvider = new TaskIconProvider(m_settings->iconNormalization());
@@ -130,6 +136,11 @@ QColor DockView::backgroundColor() const
     qreal opacity = m_settings->backgroundOpacity();
 
     return computeBackgroundColor(type, m_settings->tintColor(), opacity, m_settings->useAccentColor(), m_settings->useSystemColor());
+}
+
+bool DockView::isPointerInside() const
+{
+    return m_pointerFocusTracker && m_pointerFocusTracker->isPointerInside();
 }
 
 int DockView::backgroundStyleType() const
