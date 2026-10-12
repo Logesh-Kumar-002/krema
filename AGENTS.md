@@ -17,6 +17,13 @@ Rules that apply to every agent working on this repository, regardless of harnes
 - Documentation, manifests, and PR communication are in English.
 - When adding or removing a dependency (`find_package()` / `target_link_libraries()` in CMake), update `packaging/arch/PKGBUILD` (`depends` / `makedepends`) and the OBS packaging (`packaging/obs/krema.spec`, `packaging/obs/debian.control`) in the same change.
 
+## Pull Request Completion
+
+- A PR is ready for review or merge only when every CI check on its head is green, the change has been QA'd in a running Krema session, and review feedback is resolved.
+- QA means exercising the changed behavior in a real KWin Wayland session (for example, maximize a window to check space reservation) and observing the result. Use `kwin-mcp` when the check needs automation. Passing unit tests or reading the code is not QA; never report a feature as working without having observed it.
+- Fix E2E and CI failures the PR causes or exposes in that same PR. Do not merge with known E2E breakage or defer it to a follow-up.
+- Reproduce and iterate on E2E failures locally with `tests/appium/run-e2e.sh` (Docker) until they pass; do not use repeated CI pushes as the debug loop.
+
 ## Visual Evidence for Pull Requests
 
 - Every agent MUST upload media evidence to the PR body or a PR comment for every visual change before requesting or conducting PR review (including internal agent review), marking the PR ready for review, or merging it.
@@ -27,6 +34,10 @@ Rules that apply to every agent working on this repository, regardless of harnes
 - Use any suitable capture method within existing authorization and safety rules. If one method fails, try another available route (local, containerized, or remote); capture difficulty does not waive this requirement.
 - Open the uploaded media and confirm reviewers can view it and the change is clearly visible. Refresh evidence when subsequent commits alter the demonstrated appearance or behavior.
 - If no authorized capture route works, report the concrete blocker and required access; keep the visual work incomplete and the PR not ready for review until evidence is attached.
+
+## Branding and Media Assets
+
+- `branding/README.md` is the brand kit and the single home of promotional assets. Read it before creating or editing logos, social cards, screenshots, clips, or any promotional or website media, and follow its palette, wallpaper, and regeneration rules. Never reuse the old brand palette.
 
 ## Roadmap
 
