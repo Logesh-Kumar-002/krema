@@ -11,7 +11,8 @@ All coordinates are **global screen pixels** (use ``Krema.to_screen()`` /
 ``Krema.item_center()`` to convert AT-SPI rects).
 The inputsynth in the image is patched (tools/inputsynth-fixes.patch): every
 ``pointerMove`` is absolute, so several moves can share one chain (needed
-for drags), and the W3C Meta key is Super (KDE's Meta).
+for drags), the W3C Meta key is Super (KDE's Meta), and U+E05E, which W3C
+leaves unassigned, is the Menu (context menu) key: ``key("Menu")``.
 
 All chains go to one long-lived ``inputsynth --stdin`` per session (see
 :class:`_Inputsynth`), so they share one fake-input device, and a chain costs
@@ -72,6 +73,8 @@ _KEY_ALIASES = {
     "pageup": Keys.PAGE_UP,
     "pagedown": Keys.PAGE_DOWN,
     **{f"f{i}": getattr(Keys, f"F{i}") for i in range(1, 13)},
+    # Not a W3C key: tools/inputsynth-fixes.patch maps U+E05E to XKB Menu.
+    "menu": "\ue05e",
 }
 
 
@@ -303,7 +306,31 @@ def hold_pointer_capability(park: tuple[int, int]) -> subprocess.Popen:
         proc.kill()
         raise
     _pointer = (int(park[0]), int(park[1]))
+    _capability_holds.append(proc)
     return proc
+
+
+#: Keep-alive processes started by hold_pointer_capability().
+_capability_holds: list[subprocess.Popen] = []
+
+
+def release_pointer_capability() -> None:
+    """Terminate every keep-alive started by :func:`hold_pointer_capability`."""
+    while _capability_holds:
+        # Unregister only once reaped, so an interrupted release can be retried.
+        proc = _capability_holds[-1]
+        proc.terminate()
+        proc.wait(5)
+        _capability_holds.pop()
+
+
+def drop_pointer_capability() -> None:
+    """Remove every fake-input device (the session's inputsynth and every
+    keep-alive), so KWin drops ``wl_seat`` pointer capability, as when the
+    last mouse is unplugged. Restore it with :func:`hold_pointer_capability`;
+    that keep-alive then stands in for the session's until the session ends."""
+    _close_inputsynth()
+    release_pointer_capability()
 
 
 def move(x: int, y: int, duration_ms: int = 0) -> None:
