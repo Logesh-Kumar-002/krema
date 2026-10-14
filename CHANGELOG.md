@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Centered dock icons across the panel thickness with equal padding on vertical and horizontal docks, and centered running-window indicator dots within the screen-edge margin (#103)
+- Preserved pinned app order when startup notifications gave way to windows
 
 ## [0.12.0] - 2026-10-12
 
